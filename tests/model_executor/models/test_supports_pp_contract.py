@@ -39,7 +39,12 @@ def _declares_supports_pp(node: ast.ClassDef) -> bool:
 
 
 def _provides_attr(node: ast.ClassDef) -> bool:
-    """True if the class defines the attribute or assigns it to ``self``."""
+    """True if the class defines the attribute or binds it on the class or ``self``.
+
+    An annotation without a value (``make_empty_intermediate_tensors: Callable``)
+    binds nothing at runtime -- that is exactly how the attribute went missing in
+    vLLM 0.28 -- so only an ``AnnAssign`` carrying a value counts.
+    """
     for child in ast.walk(node):
         if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)) and child.name == ATTR:
             return True
@@ -47,7 +52,9 @@ def _provides_attr(node: ast.ClassDef) -> bool:
             for target in child.targets:
                 if isinstance(target, ast.Attribute) and target.attr == ATTR:
                     return True
-        if isinstance(child, ast.AnnAssign):
+                if isinstance(target, ast.Name) and target.id == ATTR:
+                    return True
+        if isinstance(child, ast.AnnAssign) and child.value is not None:
             target = child.target
             if isinstance(target, ast.Attribute) and target.attr == ATTR:
                 return True
@@ -90,3 +97,39 @@ def test_supports_pp_classes_provide_make_empty_intermediate_tensors():
         "model) or drop SupportsPP if the model does not implement pipeline "
         "parallelism:\n  " + "\n  ".join(missing)
     )
+
+
+BINDS_ATTR = [
+    pytest.param("def " + ATTR + "(self, *a, **kw): ...", id="method"),
+    pytest.param("def __init__(self):\n        self." + ATTR + " = self.model." + ATTR, id="self-assign"),
+    pytest.param(
+        "def __init__(self):\n        self." + ATTR + ": Callable = self.model." + ATTR,
+        id="self-annotated-assign",
+    ),
+    pytest.param(ATTR + " = staticmethod(_make_empty)", id="class-assign"),
+    pytest.param(ATTR + ": Callable = staticmethod(_make_empty)", id="class-annotated-assign"),
+]
+
+BINDS_NOTHING = [
+    pytest.param(ATTR + ": Callable", id="bare-class-annotation"),
+    pytest.param("def __init__(self):\n        self." + ATTR + ": Callable", id="bare-self-annotation"),
+    pytest.param("def forward(self, intermediate_tensors=None): ...", id="unrelated-method"),
+]
+
+
+def _parse_class(body: str) -> ast.ClassDef:
+    node = ast.parse(f"class M(nn.Module, SupportsPP):\n    {body}\n").body[0]
+    assert isinstance(node, ast.ClassDef) and _declares_supports_pp(node)
+    return node
+
+
+@pytest.mark.cpu
+@pytest.mark.parametrize("body", BINDS_ATTR)
+def test_provides_attr_accepts_real_bindings(body):
+    assert _provides_attr(_parse_class(body))
+
+
+@pytest.mark.cpu
+@pytest.mark.parametrize("body", BINDS_NOTHING)
+def test_provides_attr_rejects_bare_annotations(body):
+    assert not _provides_attr(_parse_class(body))
