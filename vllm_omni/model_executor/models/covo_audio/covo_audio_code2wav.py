@@ -48,7 +48,7 @@ class CovoAudioCode2WavForConditionalGeneration(nn.Module):
             map_location="cpu",
             weights_only=True,
         )
-        self.decoder.load_state_dict(ckpt)
+        self.decoder.load_state_dict(ckpt, strict=False)
         self.decoder.eval()
         self.infer_config = code2wav_config.inference
         self._decoder_moved = False
